@@ -1,0 +1,9 @@
+{
+  "venueCodes": ["ALUC"],
+  "movie": "Avengers: Doomsday",
+  "format": "DOLBY CINEMA",
+  "dates": ["20261218", "20261219"],
+  "pollIntervalMs": 300000,
+  "alertRepeat": 3,
+  "alertRepeatIntervalMs": 10000
+}

@@ -3,3 +3,4 @@ status.json
 .DS_Store
 .env
 config.json
+formats.json

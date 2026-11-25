@@ -1,6 +1,10 @@
 var CryptoJS = require('crypto-js');
 var fs = require('fs');
 var path = require('path');
+var common = require('./common');
+
+var fail = common.fail;
+var fatalError = common.fatalError;
 
 var STATUS_FILE_PATH = path.join(__dirname, 'status.json');
 
@@ -11,13 +15,6 @@ var AES_IV = CryptoJS.lib.WordArray.create(0, 128);
 var AVAILABLE_STATUS_CODES = ['1', '4', '7', '8'];
 
 var BMS_URL = 'https://services-in.bookmyshow.com/doTrans.aspx';
-var REQUEST_TIMEOUT_MS = 15000;
-
-// Consecutive transient failures before a "watcher failing" ntfy message is sent.
-var TRANSIENT_FAILURE_THRESHOLD = 5;
-
-// Largest delay setTimeout accepts; bigger values fire after 1ms.
-var MAX_TIMER_MS = 2147483647;
 
 // Command-line options / config keys that hold a single value.
 var OPTIONS = [
@@ -65,27 +62,6 @@ var HELP = [
     '  node bms.js --config=config.json'
 ].join('\n');
 
-function fail(message) {
-    console.error(message);
-    process.exit(1);
-}
-
-function checkOption(option, value, label) {
-    if (option.type === 'int') {
-        if (!Number.isInteger(value) || value < option.min || value > MAX_TIMER_MS) {
-            fail(label + ' must be an integer from ' + option.min + ' to ' + MAX_TIMER_MS + ', got ' + JSON.stringify(value));
-        }
-    } else if (typeof value !== 'string' || value === '') {
-        fail(label + ' must be a non-empty string, got ' + JSON.stringify(value));
-    }
-    return value;
-}
-
-function parseCliValue(option, text) {
-    var value = option.type === 'int' && /^\d+$/.test(text) ? Number(text) : text;
-    return checkOption(option, value, '--' + option.flag);
-}
-
 function addSeatRange(seats, row, from, to, label) {
     if (row === '') {
         fail(label + ': empty row name');
@@ -129,83 +105,31 @@ function parseSeatsConfig(value) {
     return seats;
 }
 
-function loadConfigFile(configPath) {
-    var config;
-    try {
-        config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    } catch (err) {
-        fail('Cannot load config file ' + configPath + ': ' + err.message);
-    }
-    if (config === null || typeof config !== 'object' || Array.isArray(config)) {
-        fail('Config file ' + configPath + ' must contain a JSON object');
-    }
-    var known = OPTIONS.map(function (option) { return option.key; }).concat(['seats']);
-    Object.keys(config).forEach(function (key) {
-        if (known.indexOf(key) === -1) {
-            fail('Unknown key "' + key + '" in config file ' + configPath + ' (allowed: ' + known.join(', ') + ')');
-        }
-    });
-    return config;
-}
-
-// Splits argv into { printLayout, help, flags: { <flag name>: <text value> } }.
-function parseCli(argv) {
-    var cli = { printLayout: false, help: false, flags: {} };
-    var valueFlags = OPTIONS.map(function (option) { return option.flag; }).concat(['seats', 'config']);
-    argv.forEach(function (arg) {
-        var match = arg.match(/^--([^=]+)=(.*)$/);
-        if (arg === '--print-layout') {
-            cli.printLayout = true;
-        } else if (arg === '--help' || arg === '-h') {
-            cli.help = true;
-        } else if (match && valueFlags.indexOf(match[1]) !== -1) {
-            cli.flags[match[1]] = match[2];
-        } else {
-            fail('Unknown option: ' + arg + ' (see --help)');
-        }
-    });
-    return cli;
-}
-
-// Precedence, lowest to highest: defaults < config file < env vars < CLI flags.
 function loadSettings(argv) {
-    if (argv.indexOf('--help') !== -1 || argv.indexOf('-h') !== -1) {
-        console.log(HELP);
-        process.exit(0);
-    }
-    var cli = parseCli(argv);
-    var settings = {
-        printLayout: cli.printLayout,
-        pollIntervalMs: 60000,
-        alertRepeat: 3,
-        alertRepeatIntervalMs: 10000,
-        seats: Object.create(null)
-    };
-
-    if (cli.flags.config !== undefined) {
-        var config = loadConfigFile(cli.flags.config);
-        OPTIONS.forEach(function (option) {
-            if (config[option.key] !== undefined) {
-                settings[option.key] = checkOption(option, config[option.key], 'config "' + option.key + '"');
+    var settings = common.loadSettings(argv, {
+        help: HELP,
+        options: OPTIONS,
+        defaults: {
+            pollIntervalMs: 60000,
+            alertRepeat: 3,
+            alertRepeatIntervalMs: 10000,
+            seats: Object.create(null)
+        },
+        switches: ['print-layout'],
+        extraFlags: ['seats'],
+        extraConfigKeys: ['seats'],
+        applyConfig: function (config, settings) {
+            if (config.seats !== undefined) {
+                settings.seats = parseSeatsConfig(config.seats);
             }
-        });
-        if (config.seats !== undefined) {
-            settings.seats = parseSeatsConfig(config.seats);
-        }
-    }
-
-    if (process.env.NTFY_TOPIC) {
-        settings.ntfyTopic = process.env.NTFY_TOPIC;
-    }
-
-    OPTIONS.forEach(function (option) {
-        if (cli.flags[option.flag] !== undefined) {
-            settings[option.key] = parseCliValue(option, cli.flags[option.flag]);
+        },
+        applyCli: function (cli, settings) {
+            settings.printLayout = !!cli.switches['print-layout'];
+            if (cli.flags.seats !== undefined) {
+                settings.seats = parseSeatsFlag(cli.flags.seats);
+            }
         }
     });
-    if (cli.flags.seats !== undefined) {
-        settings.seats = parseSeatsFlag(cli.flags.seats);
-    }
 
     if (!settings.venueCode || !settings.sessionId) {
         fail('--venue-code and --session-id are required (as flags or in the config file), see --help');
@@ -220,14 +144,9 @@ var args = loadSettings(process.argv.slice(2));
 
 var CLIENT_IP = process.env.BMS_CLIENT_IP;
 
-var NTFY_URL = 'https://ntfy.sh/' + args.ntfyTopic;
-
 // Seat keys ("<rowname><seatNumber>") already alerted on; cleared once a seat
 // goes unavailable so it can re-trigger next time it opens up.
 var alertedSeatKeys = new Set();
-
-var consecutiveFailures = 0;
-var failureAlertSent = false;
 
 var headers = {
     'authority': 'services-in.bookmyshow.com',
@@ -254,14 +173,6 @@ if (CLIENT_IP) {
 var dataString = 'strCommand=GETSEATLAYOUT&strAppCode=WEB&strVenueCode=' + args.venueCode
     + '&lngTransactionIdentifier=0&strParam1=' + args.sessionId
     + '&strParam2=WEB&strParam3=&strParam4=&strParam5=Y&strParam6=&strParam7=&strParam8=&strParam9=&strParam10=&strFormat=json';
-
-// Errors are transient (network/HTTP/API hiccups: keep polling) unless created
-// by fatalError(), which marks a data-format problem that retrying won't fix.
-function fatalError(message) {
-    var err = new Error(message);
-    err.fatal = true;
-    return err;
-}
 
 function decrypt(base64CipherText) {
     var decrypted;
@@ -290,31 +201,11 @@ function isSeatWanted(rowname, seatNumber) {
     return range !== undefined && seatNumber >= range[0] && seatNumber <= range[1];
 }
 
-async function sendNtfy(message) {
-    try {
-        var response = await fetch(NTFY_URL, {
-            method: 'POST',
-            body: message,
-            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
-        });
-        if (!response.ok) {
-            console.error('ntfy alert failed:', response.status, await response.text());
-        }
-    } catch (err) {
-        console.error('ntfy alert failed:', err.message);
-    }
-}
-
 // One notification per poll for all newly available seats, so a big batch of
 // seats opening at once doesn't hit ntfy's rate limit.
 function alertSeatsAvailable(seatKeys) {
     var message = (seatKeys.length === 1 ? 'Seat ' : 'Seats ') + seatKeys.join(', ') + ' available!';
-    console.log('ALERT:', message);
-    for (var burst = 0; burst < args.alertRepeat; burst++) {
-        setTimeout(function () {
-            sendNtfy(message);
-        }, burst * args.alertRepeatIntervalMs);
-    }
+    common.alertBurst(args, message);
 }
 
 /*
@@ -481,22 +372,11 @@ function printSeatLayout(layout) {
 
 // Returns the encrypted strData; any failure here is transient.
 async function fetchEncryptedLayout() {
-    var status, text;
-    try {
-        var response = await fetch(BMS_URL, {
-            method: 'POST',
-            headers: headers,
-            body: dataString,
-            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
-        });
-        status = response.status;
-        text = await response.text();
-    } catch (err) {
-        throw new Error('request failed: ' + err.message);
-    }
-    if (status !== 200) {
-        throw new Error('HTTP ' + status);
-    }
+    var text = await common.fetchText(BMS_URL, {
+        method: 'POST',
+        headers: headers,
+        body: dataString
+    });
 
     var data;
     try {
@@ -545,43 +425,11 @@ function processSeatLayout(layout) {
     });
 }
 
-// Sends one "failing" message per streak of consecutive transient failures.
-async function recordTransientFailure(err) {
-    consecutiveFailures++;
-    if (consecutiveFailures >= TRANSIENT_FAILURE_THRESHOLD && !failureAlertSent) {
-        failureAlertSent = true;
-        await sendNtfy('bms watcher failing: ' + err.message);
+common.runPoller('bms watcher', args, args.printLayout, async function () {
+    var layout = parseSeatLayout(decrypt(await fetchEncryptedLayout()));
+    if (args.printLayout) {
+        printSeatLayout(layout);
+    } else {
+        processSeatLayout(layout);
     }
-}
-
-// The next poll is scheduled only after the current one is handled, so
-// requests never overlap. Transient errors are logged and polling continues;
-// a fatal error stops the watcher (after telling ntfy) with exit code 1.
-async function poll() {
-    try {
-        var layout = parseSeatLayout(decrypt(await fetchEncryptedLayout()));
-        if (args.printLayout) {
-            printSeatLayout(layout);
-        } else {
-            processSeatLayout(layout);
-        }
-        consecutiveFailures = 0;
-        failureAlertSent = false;
-    } catch (err) {
-        console.error((err.fatal ? 'Fatal error: ' : 'Transient error: ') + err.message);
-        if (args.printLayout) {
-            process.exitCode = 1;
-        } else if (err.fatal) {
-            process.exitCode = 1;
-            await sendNtfy('bms watcher stopped: ' + err.message);
-            return;
-        } else {
-            await recordTransientFailure(err);
-        }
-    }
-    if (!args.printLayout) {
-        setTimeout(poll, args.pollIntervalMs);
-    }
-}
-
-poll();
+});
