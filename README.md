@@ -12,7 +12,7 @@ A small Node.js script that polls the BookMyShow seat layout for a single show, 
   - Rows `C D E F G H I K L M`: seats 12–25
 
   To change these, edit `CUSTOM_ROW_RANGES`, `DEFAULT_RANGE_ROWS` and `DEFAULT_RANGE` in `bms.js`.
-- **Push alerts via ntfy**: sends `Seat <row><number> available!` to `https://ntfy.sh/<topic>`, repeated `--notify-repeat` times (default 3), `--notify-repeat-interval` ms apart (default 10s), so it's hard to miss.
+- **Push alerts via ntfy**: sends one message per poll listing every newly available wanted seat (e.g. `Seats M15, M16 available!`) to `https://ntfy.sh/<topic>`, repeated `--notify-repeat` times (default 3), `--notify-repeat-interval` ms apart (default 10s), so it's hard to miss.
 - **No duplicate alerts**: each seat alerts once while it stays available. When it gets booked again, it is forgotten, so it alerts again if it reopens.
 - **Status snapshot**: every poll writes `status.json` with the timestamp, total available seats, counts per row and per category, and the list of wanted seats currently available.
 - **Layout viewer**: `--print-layout` fetches once and prints the category legend and an ASCII seat map (`[xx]` = available, `xx` = booked, `..` = no seat), grouped by category.

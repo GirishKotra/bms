@@ -127,15 +127,19 @@ function isSeatWanted(rowname, seatNumber) {
 }
 
 function sendNtfyAlert(message) {
-    request({ url: NTFY_URL, method: 'POST', body: message }, function (err) {
+    request({ url: NTFY_URL, method: 'POST', body: message }, function (err, response, body) {
         if (err) {
             console.error('ntfy alert failed:', err.message);
+        } else if (response.statusCode !== 200) {
+            console.error('ntfy alert failed:', response.statusCode, body);
         }
     });
 }
 
-function alertSeatAvailable(rowname, seatNumber) {
-    var message = 'Seat ' + rowname + seatNumber + ' available!';
+// One notification per poll for all newly available seats, so a big batch of
+// seats opening at once doesn't hit ntfy's rate limit.
+function alertSeatsAvailable(seatKeys) {
+    var message = (seatKeys.length === 1 ? 'Seat ' : 'Seats ') + seatKeys.join(', ') + ' available!';
     console.log('ALERT:', message);
     for (var burst = 0; burst < args.notifyRepeat; burst++) {
         setTimeout(function () {
@@ -148,7 +152,7 @@ function alertSeatAvailable(rowname, seatNumber) {
 // Each seat looks like "<catLetter><statusDigit><slotIndex>+<seatNumber>", e.g. "D101+35".
 // slotIndex is the physical column/slot position (includes aisle gaps); seatNumber
 // (after "+") is the actual seat number shown in the BookMyShow UI.
-function processRow(rowBlock, seenSeatKeys, stats, categoryNames) {
+function processRow(rowBlock, seenSeatKeys, newSeatKeys, stats, categoryNames) {
     var fields = rowBlock.split(':');
     var row = {
         rowcode: fields[0],
@@ -184,7 +188,7 @@ function processRow(rowBlock, seenSeatKeys, stats, categoryNames) {
         stats.wantedSeats.push(seatKey);
         if (!alertedSeatKeys.has(seatKey)) {
             alertedSeatKeys.add(seatKey);
-            alertSeatAvailable(row.rowname, seatNumber);
+            newSeatKeys.push(seatKey);
         }
     }
 }
@@ -293,10 +297,14 @@ function handleSeatLayoutResponse(error, response, body) {
     };
 
     var seenSeatKeys = new Set();
+    var newSeatKeys = [];
     for (var n = 0; n < rowBlocks.length; n++) {
         if (rowBlocks[n] !== '') {
-            processRow(rowBlocks[n], seenSeatKeys, stats, categoryNames);
+            processRow(rowBlocks[n], seenSeatKeys, newSeatKeys, stats, categoryNames);
         }
+    }
+    if (newSeatKeys.length > 0) {
+        alertSeatsAvailable(newSeatKeys);
     }
     stats.wantedAvailable = stats.wantedSeats.length;
     writeStatusFile(stats);
