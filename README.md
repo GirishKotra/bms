@@ -1,13 +1,14 @@
 # bms — BookMyShow watchers
 
-Two small Node.js scripts that poll BookMyShow and push a phone notification (via [ntfy](https://ntfy.sh)) when something you are waiting for shows up:
+Small Node.js scripts that poll BookMyShow and push a phone notification (via [ntfy](https://ntfy.sh)) when something you are waiting for shows up, plus a helper to find the codes they need:
 
-| Script | Watches for |
+| Script | Purpose |
 |---|---|
-| [`bms.js`](#bmsjs--seat-watcher) | wanted seats opening up in one show |
-| [`formats.js`](#formatsjs--format-watcher) | a movie being listed in a given screen format (e.g. Dolby Cinema) at chosen theatres |
+| [`bms.js`](#bmsjs--seat-watcher) | watches for wanted seats opening up in one show |
+| [`formats.js`](#formatsjs--format-watcher) | watches for a movie being listed in a given screen format (e.g. Dolby Cinema) at chosen theatres |
+| [`lookup.js`](#lookupjs--find-codes-and-session-ids) | finds theatre codes, movie editions and session ids |
 
-Both share `common.js` (option parsing, ntfy alerts, polling loop, error handling).
+`bms.js` and `formats.js` share `common.js` (option parsing, ntfy alerts, polling loop, error handling). `lookup.js` and `formats.js` share `bmsapi.js` (BookMyShow region, search, movie and theatre requests).
 
 Requires Node.js >= 18 (uses the built-in `fetch`).
 
@@ -18,6 +19,48 @@ npm install
 ```
 
 Install the [ntfy app](https://ntfy.sh) on your phone and subscribe to a hard-to-guess topic name. Anyone who knows the topic can read and post to it.
+
+## lookup.js — find codes and session ids
+
+Looks things up on BookMyShow so you don't have to dig through the website. Three subcommands, all taking `--city=<city>` (a name, e.g. `hyderabad` or `bengaluru`; `bangalore` works too). Results are plain lists, nothing is interactive. `node lookup.js --help` and `node lookup.js <command> --help` print the usage. Unknown options are rejected, and a failed lookup exits with code 1.
+
+```sh
+node lookup.js theatre --city=hyderabad "allu kokapet"
+node lookup.js movie --city=hyderabad "avengers doomsday"
+node lookup.js shows --city=hyderabad --theatre="allu kokapet" --movie="avengers doomsday" --date=20261217
+```
+
+**`theatre`** lists the theatres in the city whose name or address contains every word of the text (ignoring case), with their venue codes:
+
+```
+1 theatre(s) in Hyderabad matching "allu kokapet":
+ALUC  ALLU Cinemas: Kokapet  Plot 20, Adjacent to Allu Studios, Power Welfare Society, Narsingi, Hyderabad, Telangana 500075, India
+```
+
+**`movie`** lists the movies whose title contains every word of the text, with the event code, event group and the editions BookMyShow lists in the city (each edition has its own event code, format and language). Editions are read for the nearest date open for booking, and for the first 5 matching movies only:
+
+```
+ET00439706  Avengers: Doomsday  (event group EG00437704)
+  Editions in Hyderabad:
+    ET00439706  2D                    English
+    ET00526396  HDR By Barco          English
+    ET00526306  MS-Infinity Vsn 3d    English
+    ET00526323  MS-Infinity Vsn 3d    Telugu
+```
+
+**`shows`** lists the shows of a movie at one theatre on one date, each with the `bms.js` command that watches its seats. `--theatre` is name/address words or a venue code (of a theatre in `--city`) and must match exactly one theatre (otherwise the candidates are listed and the exit code is 1). `--time=HH:MM` keeps only the show starting then. A date that is not open for booking is reported together with the theatre's open dates.
+
+```
+ALLU Cinemas: Kokapet (ALUC), Thu 17 Dec 2026: 5 show(s) matching "avengers doomsday"
+TIME   SCREEN    FORMAT          EDITION             LANGUAGE  SESSION  WATCH SEATS
+10:00  SCREEN 2  LASER 4K ATMOS  MS-Infinity Vsn 3d  English   7007     node bms.js --venue-code=ALUC --session-id=7007
+13:15  SCREEN 2  LASER 4K ATMOS  MS-Infinity Vsn 3d  English   7043     node bms.js --venue-code=ALUC --session-id=7043
+...
+```
+
+FORMAT is the screen format (`Attributes`) that `formats.js` matches on; EDITION is the movie's edition (event dimension).
+
+The theatre list comes from the city's cinemas page, which BookMyShow protects against scripts. If it can't be read (HTTP 403, a challenge page), `lookup.js` retries once with more browser-like headers; if that fails it falls back to BookMyShow's search, which finds fewer theatres, and says so. If the other requests are blocked too it fails with a message saying BookMyShow is probably blocking automated requests. Try again later.
 
 ## bms.js — seat watcher
 
@@ -132,7 +175,7 @@ Alerts when chosen theatres start listing a chosen movie in a chosen screen form
 
 ### Finding the venue code
 
-Open the theatre's page on BookMyShow. The venue code is the part before the date in the `buytickets` URL:
+`node lookup.js theatre --city=<city> <name words>` lists venue codes (see [lookup.js](#lookupjs--find-codes-and-session-ids)). Or open the theatre's page on BookMyShow. The venue code is the part before the date in the `buytickets` URL:
 
 ```
 https://in.bookmyshow.com/cinemas/<city>/<slug>/buytickets/<VENUECODE>/<date>
@@ -142,7 +185,7 @@ https://in.bookmyshow.com/cinemas/hyderabad/allu-cinemas-kokapet/buytickets/ALUC
 ### Usage
 
 ```sh
-NTFY_TOPIC=my-secret-topic node formats.js --venue-codes=ALUC --movie="Avengers: Doomsday" \
+NTFY_TOPIC=my-secret-topic node formats.js --venue-codes=ALUC --city=hyderabad --movie="Avengers: Doomsday" \
     --format="DOLBY CINEMA" --dates=20261218,20261219
 
 node formats.js --config=formats.json
@@ -153,6 +196,7 @@ node formats.js --config=formats.json
 | Flag | Default | Description |
 |---|---|---|
 | `--venue-codes=<codes>` | required | Comma-separated venue codes |
+| `--city=<city>` | required | City of the theatres; used by the [startup checks](#startup-checks) only |
 | `--movie=<title>` | required | Movie title to look for |
 | `--format=<format>` | required | Screen format to look for |
 | `--dates=<dates>` | required | Comma-separated show dates, `YYYYMMDD`; must be real calendar dates (`20260231` is rejected at startup) |
@@ -165,9 +209,31 @@ node formats.js --config=formats.json
 
 Unknown flags are rejected. The config file takes the same settings as camelCase keys (`venueCodes` and `dates` as arrays of strings, `dates` as `"YYYYMMDD"`; items are trimmed and must not be empty); see `formats.example.json`. Unknown keys are an error. Precedence is the same as for `bms.js`: built-in defaults, config file, env vars (`NTFY_TOPIC`), CLI flags. Copy the example to `formats.json` (git-ignored) and add your `ntfyTopic` there, or use `NTFY_TOPIC`.
 
+### Startup checks
+
+Alongside polling, `formats.js` runs three checks to catch typos and wrong expectations, and prints the results to stdout as they finish. They start together with the first poll and never delay it:
+
+```
+Startup checks (warnings only, run alongside polling):
+Warning: ALLU Cinemas: Kokapet (ALUC) lists no shows in DOLBY CINEMAA on its open dates (6 of 6 checked); formats it does list: LASER 4K ATMOS, DOLBY CINEMA
+Warning: no shows in DOLBY CINEMAA for Avengers: Doomsday at any theatre in Hyderabad on 20261217, 20261218
+Warning: none of the formats planned for Avengers: Doomsday (ET00439706) contains DOLBY CINEMAA (planned: 2D, HDR By Barco, DOLBY CINEMA 2D, ...)
+Startup checks done.
+```
+
+1. **Theatre**: for each venue, looks through its open dates (at most 10 requests per venue) for any show, of any movie, whose screen attribute contains `--format`. If there is none, it warns and lists the formats the theatre does show, which usually exposes a typo.
+2. **Movie in the city**: finds `--movie` in BookMyShow search, takes the movie's editions in `--city` (taken from the first of `--dates`) and asks, for every edition and every date, which theatres list a show in `--format`. It lists the theatres found, or warns that there are none. At most 30 requests; the output says if it stopped early.
+3. **Planned formats**: reads the formats BookMyShow lists for the movie (its event dimensions, e.g. `DOLBY CINEMA 2D`) and reports whether one contains `--format`.
+
+The checks only warn: they never stop the script. They run alongside polling and only print: they do not affect polling, alerts or exit codes, and when the alert is sent (or the watcher stops on a fatal error) the script exits without waiting for checks still in progress. A check that cannot run (network error, HTTP 403 from BookMyShow's bot protection, unexpected response) prints `Warning: could not check <what>: <reason>` and the script carries on. Their limits:
+
+- The planned formats are event dimensions such as `DOLBY CINEMA 2D`. The shows' screen attributes can differ from them (the alert matches the screen attribute, e.g. `DOLBY CINEMA`), so a warning in check 3 alone is a hint, not proof.
+- A theatre's screen with no shows cannot be seen. A theatre that has a Dolby screen but is not showing anything on it looks the same as one without.
+- Shows are only visible for dates open for booking, so a format that is not listed yet is expected to warn in checks 1 and 2. That is what the watcher waits for.
+
 ### How matching works
 
-- **Movie**: the show's title (`EventTitle`) contains `--movie`, ignoring case. Not the event code: a Dolby edition of a movie may have a different one.
+- **Movie**: the show's title (`EventTitle`) contains `--movie`, ignoring case, punctuation and spacing, so `avengers doomsday` matches `Avengers: Doomsday`. Not the event code: a Dolby edition of a movie may have a different one.
 - **Format**: the show's screen attribute (`Attributes`, e.g. `LASER 4K ATMOS`, `DOLBY CINEMA`) contains `--format`, ignoring case. Runs of whitespace count as one space, so `dolby cinema` matches `DOLBY  CINEMA`. The edition label in the movie's name (e.g. `DOLBY CINEMA 3D` in the event dimension) is deliberately not used.
 - **Dates**: only the dates you list are checked. A date BookMyShow has not opened for booking is treated as having no shows (BookMyShow answers such requests with the nearest open date, which is ignored).
 - **Alert once, then exit**: as soon as any match exists for any venue and date, including shows already listed when the script starts, it sends one message listing all matches grouped by venue and date, repeated `--alert-repeat` times, then exits with code 0 once at least one send succeeded. If every send fails, the failure is logged, polling continues and the alert is retried on the next poll. Each show is listed with its time, screen and session id, plus its title and screen format when they differ from what you asked for (e.g. a longer title, or `LASER 4K ATMOS` when you asked for `LASER`). Long lists are cut with "...and N more".

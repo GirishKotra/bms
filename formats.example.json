@@ -1,5 +1,6 @@
 {
   "venueCodes": ["ALUC"],
+  "city": "hyderabad",
   "movie": "Avengers: Doomsday",
   "format": "DOLBY CINEMA",
   "dates": ["20261218", "20261219"],

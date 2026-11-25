@@ -21,6 +21,18 @@ function fatalError(message) {
     return err;
 }
 
+// True for a real calendar date written YYYYMMDD (rejects 20260231, knows leap years).
+function isRealDate(text) {
+    if (!/^\d{8}$/.test(text)) {
+        return false;
+    }
+    var year = Number(text.slice(0, 4));
+    var month = Number(text.slice(4, 6));
+    var day = Number(text.slice(6, 8));
+    var utc = new Date(Date.UTC(year, month - 1, day));
+    return utc.getUTCFullYear() === year && utc.getUTCMonth() === month - 1 && utc.getUTCDate() === day;
+}
+
 // Option types: 'string' (non-empty), 'int' (min..MAX_TIMER_MS), and 'list'
 // (non-empty array of non-empty strings, trimmed, each accepted by
 // option.validate(item) if given; option.itemHint describes an item in the
@@ -195,9 +207,11 @@ function alertBurst(settings, message) {
  * continues (one "<name> failing" ntfy message per streak of
  * TRANSIENT_FAILURE_THRESHOLD consecutive failures); a fatal error stops the
  * watcher (after telling ntfy) with exit code 1. With once, poll() runs a
- * single time, errors set exit code 1 and nothing is sent to ntfy.
+ * single time, errors set exit code 1 and nothing is sent to ntfy. onStop,
+ * if given, is called once polling has ended for good (poll() returned true,
+ * or a fatal error was handled), never in once mode.
  */
-function runPoller(name, settings, once, poll) {
+function runPoller(name, settings, once, poll, onStop) {
     var consecutiveFailures = 0;
     var failureAlertSent = false;
 
@@ -215,6 +229,9 @@ function runPoller(name, settings, once, poll) {
             consecutiveFailures = 0;
             failureAlertSent = false;
             if (done) {
+                if (onStop) {
+                    onStop();
+                }
                 return;
             }
         } catch (err) {
@@ -224,6 +241,9 @@ function runPoller(name, settings, once, poll) {
             } else if (err.fatal) {
                 process.exitCode = 1;
                 await sendNtfy(settings.ntfyTopic, name + ' stopped: ' + err.message);
+                if (onStop) {
+                    onStop();
+                }
                 return;
             } else {
                 await recordTransientFailure(err);
@@ -240,6 +260,7 @@ function runPoller(name, settings, once, poll) {
 module.exports = {
     fail: fail,
     fatalError: fatalError,
+    isRealDate: isRealDate,
     loadSettings: loadSettings,
     fetchText: fetchText,
     alertBurst: alertBurst,
