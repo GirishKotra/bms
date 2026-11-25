@@ -12,6 +12,43 @@ Small Node.js scripts that poll BookMyShow and push a phone notification (via [n
 
 Requires Node.js >= 18 (uses the built-in `fetch`).
 
+## How it works
+
+All three scripts are plain Node.js programs that call BookMyShow's web APIs (the same ones the website uses, undocumented) and, for the watchers, push alerts through [ntfy](https://ntfy.sh). There is no server, database or browser automation; state lives in memory, plus `status.json` for `bms.js`.
+
+**`bms.js` (seat watcher)**
+1. POSTs `GETSEATLAYOUT` for the venue code + session id to `services-in.bookmyshow.com/doTrans.aspx`.
+2. Decrypts the AES-CBC encrypted seat layout with `crypto-js` and parses it into rows and seats.
+3. Picks the available seats inside your `--seats` ranges, alerts on the ones not alerted before, writes `status.json`.
+4. Waits `--poll-interval-ms`, then repeats until stopped.
+
+**`formats.js` (format watcher)**
+1. For every venue and date, GETs `in.bookmyshow.com/api/v3/mobile/showtimes/byvenue` (plain JSON: every show at the theatre that day, with its screen format).
+2. Looks for shows whose title contains `--movie` and whose screen format contains `--format`.
+3. On the first match, sends one alert listing all matching shows and exits; otherwise waits and repeats.
+4. In parallel, runs the [startup checks](#startup-checks) once, using the requests below.
+
+**`lookup.js` (code finder)** resolves names step by step: city name → region (regions list), theatre words → venue code (the city's cinemas page), movie words → event code and editions (search + showtimes-by-event API), theatre + movie + date → session ids (`showtimes/byvenue`). It prints the results and exits.
+
+**`common.js`** holds the option/config parsing, ntfy sending and the polling loop with error handling shared by the watchers. **`bmsapi.js`** holds the BookMyShow requests shared by `lookup.js` and `formats.js`.
+
+### What it depends on
+
+| Dependency | Used by | Notes |
+|---|---|---|
+| Node.js >= 18 | all | Built-in `fetch`; no HTTP library needed |
+| [`crypto-js`](https://www.npmjs.com/package/crypto-js) | `bms.js` | Only npm dependency; decrypts the seat layout |
+| [ntfy.sh](https://ntfy.sh) | `bms.js`, `formats.js` | Free public push service; alerts are POSTed to `https://ntfy.sh/<topic>`. The free tier rate-limits bursts, which is why each poll sends one combined alert |
+| BookMyShow `doTrans.aspx` (`GETSEATLAYOUT`) | `bms.js` | Encrypted seat layout; the AES key is hard-coded in `bms.js`, so a key change on BookMyShow's side stops the watcher with a fatal error |
+| BookMyShow `api/v3/mobile/showtimes/byvenue` | `formats.js`, `lookup.js` | A theatre's shows for a date; cached by BookMyShow for 5 minutes |
+| BookMyShow `api/explore/v1/discover/regions` | `lookup.js`, `formats.js` checks | City name → region code |
+| BookMyShow `<city>/cinemas` page | `lookup.js`, `formats.js` checks | Theatre list, read from the page's embedded state |
+| BookMyShow `api/v1/search/dynamic` | `lookup.js`, `formats.js` checks | Movie search; theatre fallback |
+| BookMyShow `api/movies-data/v5/showtimes-by-event/primary-dynamic` | `lookup.js`, `formats.js` checks | A movie's editions and shows across the city |
+| BookMyShow `movies/<city>/x/<eventCode>` page | `formats.js` checks | The movie's planned formats |
+
+All BookMyShow endpoints sit behind Cloudflare. Where needed the scripts send browser-like headers; the HTML pages, search and movie APIs are the strictest and the most likely to be blocked or to change. Since none of these APIs are public, any of them can change without notice; the scripts report that as an error (see each script's error handling) instead of failing silently.
+
 ## Setup
 
 ```sh
@@ -19,6 +56,23 @@ npm install
 ```
 
 Install the [ntfy app](https://ntfy.sh) on your phone and subscribe to a hard-to-guess topic name. Anyone who knows the topic can read and post to it.
+
+## Typical workflow
+
+```sh
+# 1. Find the theatre code
+node lookup.js theatre --city=hyderabad "allu kokapet"            # -> ALUC
+
+# 2. Wait for the movie to be listed in the format you want (alerts once, then exits)
+NTFY_TOPIC=my-secret-topic node formats.js --venue-codes=ALUC --city=hyderabad \
+    --movie="Avengers: Doomsday" --format="DOLBY CINEMA" --dates=20261218,20261219
+
+# 3. Pick a show (the alert lists session ids, or list them yourself)
+node lookup.js shows --city=hyderabad --theatre=ALUC --movie="avengers doomsday" --date=20261218
+
+# 4. Watch that show's seats
+NTFY_TOPIC=my-secret-topic node bms.js --venue-code=ALUC --session-id=<id> --seats="H,J,K:10-20"
+```
 
 ## lookup.js — find codes and session ids
 
@@ -79,7 +133,9 @@ Polls the BookMyShow seat layout for a single show, decrypts the response, and a
 
 ### Finding the venue code and session id
 
-Open the show's seat-selection page on BookMyShow. The URL looks like:
+Easiest: `node lookup.js shows --city=<city> --theatre=<name words> --movie=<title words> --date=<YYYYMMDD>` lists each show with the exact `bms.js` command (see [lookup.js](#lookupjs--find-codes-and-session-ids)).
+
+Or open the show's seat-selection page on BookMyShow. The URL looks like:
 
 ```
 https://in.bookmyshow.com/movies/<city>/seat-layout/<eventCode>/<venueCode>/<sessionId>/<date>
@@ -225,7 +281,7 @@ Startup checks done.
 2. **Movie in the city**: finds `--movie` in BookMyShow search, takes the movie's editions in `--city` (taken from the first of `--dates`) and asks, for every edition and every date, which theatres list a show in `--format`. It lists the theatres found, or warns that there are none. At most 30 requests; the output says if it stopped early.
 3. **Planned formats**: reads the formats BookMyShow lists for the movie (its event dimensions, e.g. `DOLBY CINEMA 2D`) and reports whether one contains `--format`.
 
-The checks only warn: they never stop the script. They run alongside polling and only print: they do not affect polling, alerts or exit codes, and when the alert is sent (or the watcher stops on a fatal error) the script exits without waiting for checks still in progress. A check that cannot run (network error, HTTP 403 from BookMyShow's bot protection, unexpected response) prints `Warning: could not check <what>: <reason>` and the script carries on. Their limits:
+The checks only print warnings: they never stop the script and do not affect polling, alerts or exit codes. When the alert is sent (or the watcher stops on a fatal error) the script exits without waiting for checks still in progress. A check that cannot run (network error, HTTP 403 from BookMyShow's bot protection, unexpected response) prints `Warning: could not check <what>: <reason>` and the script carries on. Their limits:
 
 - The planned formats are event dimensions such as `DOLBY CINEMA 2D`. The shows' screen attributes can differ from them (the alert matches the screen attribute, e.g. `DOLBY CINEMA`), so a warning in check 3 alone is a hint, not proof.
 - A theatre's screen with no shows cannot be seen. A theatre that has a Dolby screen but is not showing anything on it looks the same as one without.
@@ -259,4 +315,4 @@ Same scheme as `bms.js`, with `bms format watcher` in the ntfy messages:
 
 - In `bms.js`, seats with status codes `1`, `4`, `7` or `8` count as available.
 - `parseRow` and `parseSeatLayout` in `bms.js` document the decrypted data format.
-- These are unofficial personal tools built on BookMyShow's undocumented web APIs. They may break without warning. Use it responsibly and keep the poll interval reasonable.
+- These are unofficial personal tools built on BookMyShow's undocumented web APIs. They may break without warning. Use them responsibly and keep the poll interval reasonable.
