@@ -1,6 +1,8 @@
 {
   "dependencies": {
-    "crypto-js": "^4.2.0",
-    "request": "^2.88.2"
+    "crypto-js": "^4.2.0"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
